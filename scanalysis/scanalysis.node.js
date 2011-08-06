@@ -1,44 +1,111 @@
 var sys = require('sys'),
 	http = require('http'),
 	gzip = require('gzip'),
-	Client = require('mysql').Client,
-	client = new Client(),
+	util = require('util'),
+	sqlite3 = require('sqlite3').verbose(),
 	UPDATEINTERVAL = 10000,
 	CREDENTIALS = 'sometext',
 	HOST = 'localhost',
 	PORT = '8000',
 	PATH = '/',
-	sql = {},
-	sql.db = 'sunswift',
-	sql.table = 'log';	
-	client.user = 'root';
-	client.pass = '';						
+	sqlfile = './live.sqlite3',
+	sqltable = 'canlog',
+	loop,
+	db;		
+	
+var nodes = {
+	speed: {
+		node:20,
+		channel:6
+	},
+	batterypower: {
+		node:10,
+		channel:6
+	},
+	arraypower: {
+		node:40,
+		channel:1	// Check if this is 1,2,3
+	},
+	motorpower: {
+		node:40,
+		channel:3	// Check if this is 1,2,3
+	},
+	motortemp: {
+		node:20,
+		channel:13
+	},
+	heatsinktemp: {
+		node:20,
+		channel:12
+	},
+	latitude: {
+		node:30,
+		channel:1
+	},
+	longitude: {
+		node:30,
+		channel:2
+	}
+};
+	
 
-var loop = setInterval("fetch",UPDATEINTERVAL);
+var db = new sqlite3.Database(sqlfile,sqlite3.OPEN_READONLY,function() {
+	// Startup when sqlite database has been read
+	//loop = setInterval("fetch",UPDATEINTERVAL);
+	fetch();
+});
 
 var fetch = function() {
-	client.connect();
-	client.query('USE '+sql.db);
 	var now = Math.round((new Date()).getTime() / 1000);
 	var since = now - 30;
-	var sql = "SELECT * FROM `"+sql.table+"` WHERE timestamp > " +since+" ORDER BY timestamp ASC";
-	client.query(sql, function(error,results,fields) {
-		if (error) throw error;
-		else processData(results);
+	since = 1304755855635;		//Dev, take this out
+	var sql = "SELECT * FROM `"+sqltable+"` WHERE ciel_timestamp > "+since+" AND ciel_timestamp < "+(since+(30000))+" AND message_type=0 ORDER BY ciel_timestamp ASC";
+	db.all(sql,function(err,results) {
+		if (err) throw err;
+		else if (results.length==0) return false;
+		else processData(results,since);
 	});
-	client.end();
 };
 
-var processData = function(in) {
+var processData = function(data,start) {
+	var tmp = [];
+	for (i=0;i<data.length;i++) {
+		for (j in nodes) {
+			if (data[i].source_address == nodes[j].node && data[i].specifics == nodes[j].channel) {
+				tmp.push({
+					timestamp:data[i].ciel_timestamp,
+					node:j,
+					value:data[i].value
+				});
+			}
+		}
+	};
+	//console.log(util.inspect(tmp));
+	var current_time = start + 2000;
+	var out = [];
+	var n = 0;
+	for (i=0;i<tmp.length;i++) {
+		if (tmp[i].timestamp<current_time) {
+			if (typeof out[n] === "undefined") {
+				out[n] = new Object;
+			}
+			out[n][tmp[i].node]=(typeof out[n][tmp[i].node] !== "undefined") ? (out[n][tmp[i].node]+tmp[i].value)/2:tmp[i].value;
+			//console.log(util.inspect(out[n]));
+		}
+		else {
+			if (typeof out[n] !== "undefined") n++;
+			current_time = current_time + 2000;
+		}
+	};
+	
+	console.log(util.inspect(out));
 	// Aggregate data
 	
 	// Format POST data to send
 	
 	// Compress data
-	gzip(out, function(error, data) {
-		if (error) throw error;
-		else send(data);
-	});
+	console.log("Done here");
+	return;
 };
 
 var send = function(data) {
