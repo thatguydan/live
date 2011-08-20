@@ -1,54 +1,16 @@
-/*
-
-var net = require('net');
-var path = require('path');
-var sys = require('sys');
-var Worker = require('webworker').Worker;
-
-var NUM_WORKERS = 5;
-
-var workers = [];
-var numReqs = 0;
-
-for (var i = 0; i < NUM_WORKERS; i++) {
-	workers[i] = new Worker(path.join(__dirname, 'worker.js'));
-}
-
-net.createServer(function(s) {
-	s.pause();
-
-	var hv = 0;
-	s.remoteAddress.split('.').forEach(function(v) {
-		hv += parseInt(v);
-	});
-
-	var wid = hv % NUM_WORKERS;
-
-	sys.debug('Request from ' + s.remoteAddress + ' going to worker ' + wid);
-
-	workers[wid].postMessage(++numReqs, s.fd);
-}).listen(8080);
-
-*/
-
 var sys = require("sys"),  
     http = require("http"),
 	url = require('url'),
-	Client = require('mysql').Client,
-	
+	Client = require('mysql').Client,	
 	DATABASE = 'sunswift_live',
 	TABLE = 'log',
 	gzip = require('gzip');
-
-
-
-
 
 server = http.createServer(function(request, response){
 	// Parse the url
 	var path = url.parse(request.url).pathname;
 	var _GET = url.parse(request.url, true).query;
-	client = new Client(),
+	var client = new Client();
 	client.user = 'root';
 	client.password = '';
 	// Connect to the database
@@ -56,68 +18,107 @@ server = http.createServer(function(request, response){
 	client.query('USE '+DATABASE);
 	
 	switch (path) {
+		case '/events.json':
+			var callback = (_GET.callback) ? _GET.callback : '';	
+			sendEvents(client,request,response,callback);
+		break;
+		break;
 		case '/replay.json':
-			if (_GET.from == "" || _GET.to == "") {
+			if (!_GET.from || !_GET.to) {
 				console.log("Malformed");
+				response.writeHead(400);
+				response.end(JSON.stringify({result:0,error:"Malformed Request"}));
 				break;
 			}
-		
-			var sql = "SELECT * FROM "+TABLE+" WHERE speed BETWEEN 1 AND 100 AND timestamp>'1294351243.77' ORDER BY timestamp ASC;";
-			client.query(sql, function(error, results, fields) {
-				client.end();
-				if (error) {
-					throw error;
-					sys.log(error.message);
-				}
-				else {
-					// Prepare the JSON to go out the door
-					var json = JSON.stringify(results);
-					// If it's a JSONP request, wrap the JSON in the callback function name
-					var uncompressed = (_GET.callback) ? _GET.callback + "(" + json + ");" : json;
-					// If the browser can handle gzip
-					try { 
-						var handlesgzip = request.headers['accept-encoding'].indexOf("gzip");
-					}
-					catch (err) { 
-						var handlesgzip = -1;
-					}
-					if (handlesgzip>-1) {
-						// Compress the JSON
-						gzip(uncompressed, function(gziperror, compressed) {
-							// If there is an error, log it and then send the data uncompressed.
-							if (gziperror) {
-								sys.log(gziperror.message);	
-								sendUncompressedData(response, uncompressed);	
-							} 
-							else {
-								// If all is peachy, send the compressed data
-								console.log("Sent "+compressed.length+" bytes of data");
-								response.writeHead(200, {
-									'Content-Encoding':'gzip',
-									'Content-Length': compressed.length,
-									'Content-Type': 'application/json',
-									'Access-Control-Allow-Origin:': '*'
-								});
-								response.write(compressed);
-								response.end("\n");								
-							}
-						});
-					}
-					else {
-						sendUncompressedData(response, uncompressed);
-					}
-				}
-			
-			});		
-			break;
+			var callback = (_GET.callback) ? _GET.callback : '';
+			handleReplayRequest(_GET.from,_GET.to,client,request,response,callback);
+		break;
 		case '/last.json':
 			
 		
-			break;
+		break;
 		default: send404(response);	
 	}
 	//response.finish();
 });
+
+function sendEvents(client,request,response,callback) {
+	var sql = "SELECT title,timestamp_from,timestamp_to FROM `events` ORDER BY timestamp DESC";
+	client.query(sql,function(error,results) {
+		if (error) {
+			response.writeHead(200);
+			response.write(JSON.stringify({result:0,error:"Database Error"}));
+		}
+		else {
+			var json = JSON.stringify(results);
+			var out = (callback) ? callback + "(" + json + ");" : json;
+			response.writeHead(200);
+			response.end(out);
+		};
+	});
+}
+
+function handleReplayRequest(from, to, client, request, response, callback) {
+	try {
+		var f = Number(from);
+		var t = Number(to);
+	}
+	catch (err) {
+		response.writeHead(400);
+		response.end('Invalid Request');
+	}
+	if (isNaN(f) || isNaN(t) || !f || !t) {
+		response.writeHead(400);
+		response.end("Invalid Request");
+		return false;
+	}
+	var sql = client.format("SELECT * FROM "+TABLE+" WHERE speed BETWEEN 1 AND 120 AND timestamp > ? && timestamp < ? ORDER BY timestamp ASC;",[f,t]);
+	console.log(sql);
+	client.query(sql, function(error, results, fields) {
+		client.end();
+		if (error) {
+			throw error;
+			sys.log(error.message);
+		}
+		else {
+			// Prepare the JSON to go out the door
+			var json = JSON.stringify(results);
+			// If it's a JSONP request, wrap the JSON in the callback function name
+			var uncompressed = (callback) ? callback + "(" + json + ");" : json;
+			// If the browser can handle gzip
+			try { 
+				var handlesgzip = request.headers['accept-encoding'].indexOf("gzip");
+			}
+			catch (err) { 
+				var handlesgzip = -1;
+			}
+			if (handlesgzip>-1) {
+				// Compress the JSON
+				gzip(uncompressed, function(gziperror, compressed) {
+					// If there is an error, log it and then send the data uncompressed.
+					if (gziperror) {
+						sys.log(gziperror.message);	
+						sendUncompressedData(response, uncompressed);	
+					} 
+					else {
+						// If all is peachy, send the compressed data
+						console.log("Sent "+compressed.length+" bytes of data");
+						response.writeHead(200, {
+							'Content-Encoding':'gzip',
+							'Content-Length': compressed.length,
+							'Content-Type': 'application/json',
+							'Access-Control-Allow-Origin:': '*'
+						});
+						response.write(compressed);
+						response.end("\n");								
+					}
+				});
+			}
+			else sendUncompressedData(response, uncompressed);
+		}
+	
+	});	
+}
 
 function connect () {
 
